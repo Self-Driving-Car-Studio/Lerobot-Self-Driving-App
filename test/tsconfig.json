@@ -1,0 +1,27 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "jsx": "react-native"
+  },
+  
+  // 💡 [수정 1] "include"에서 "**/*.ts"를 제거합니다.
+  "include": [
+    "app", // 'app' 폴더만 포함
+    "lib", // 'lib' 폴더만 포함
+    "components", // 'components' 폴더만 포함
+    "**/*.tsx",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts"
+  ],
+
+  // 💡 [수정 2] 'node_modules'를 검사에서 제외하도록 명시합니다. (필수)
+  "exclude": [
+    "node_modules"
+  ]
+}
