@@ -7,7 +7,7 @@ import {
   Text, TextInput,
   View,
 } from 'react-native';
-import { useSocket } from '../SocketContext';
+import { useSocket } from '../contexts/SocketContext';
 
 // 메시지 타입 정의
 interface Message {

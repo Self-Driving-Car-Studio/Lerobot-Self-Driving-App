@@ -1,6 +1,6 @@
 import { Stack } from 'expo-router';
 import React from 'react';
-import { SocketProvider } from '../SocketContext'; // 1단계에서 만든 파일
+import { SocketProvider } from '../contexts/SocketContext'; // 1단계에서 만든 파일
 
 export default function RootLayout() {
   return (

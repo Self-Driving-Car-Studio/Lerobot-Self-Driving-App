@@ -4,7 +4,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router } from 'expo-router';
-import { useSocket } from '../SocketContext';
+import { useSocket } from '../contexts/SocketContext';
 
 // User 타입 정의
 interface User {
