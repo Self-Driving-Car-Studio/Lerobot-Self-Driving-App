@@ -1,4 +1,4 @@
-import { FontAwesome, Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { FontAwesome, Ionicons, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useLocalSearchParams } from 'expo-router';
@@ -398,11 +398,25 @@ export default function CommandScreen() {
     speak("취소되었습니다.");
   };
 
-  return (
+  // [신규] 비상 정지 핸들러 (모달 없음, 즉시 실행)
+  const handleEmergencyStop = () => {
+    logStep('Command', '🛑 비상 정지 버튼 클릭');
+    
+    // UI 즉시 피드백
+    setRobotStatus('비상 정지');
+    setRobotEmotion('error');
+    addMessage({ sender: 'system', text: '🛑 로봇을 비상 정지시켰습니다.', type: 'simple' });
+    speak("로봇을 정지합니다.");
+
+    // 소켓으로 'pause' 전송
+    if (socket) {
+      socket.emit('pause', { userId: user.id, text: '로봇 비상 정지'});
+      logStep('Socket', '📤 pause 이벤트 전송 완료');
+    }
+  };
+
+return (
     <SafeAreaView style={styles.container}>
-      {/* [수정] KeyboardAvoidingView 속성 추가 
-        keyboardVerticalOffset: 미러링 시 상단 Safe Area 오차 보정 (값은 상황에 따라 0, 10, 47 등으로 조절 필요)
-      */}
       <KeyboardAvoidingView 
         behavior={Platform.OS === 'ios' ? 'padding' : undefined} 
         style={{ flex: 1 }}
@@ -418,17 +432,38 @@ export default function CommandScreen() {
               </Text>
             </View>
           </View>
-          <TouchableOpacity style={styles.sosButton} onPress={handleSOSRequest} activeOpacity={0.7}>
-            <MaterialIcons name="phone-in-talk" size={32} color="white" />
-            <Text style={styles.sosText}>SOS</Text>
-          </TouchableOpacity>
+
+          {/* 오른쪽 버튼 영역 (STOP + SOS) */}
+          <View style={styles.headerRight}>
+            
+            {/* 비상 정지 버튼 (STOP) */}
+            <TouchableOpacity 
+              style={[styles.circleButton, styles.stopButton]} 
+              onPress={handleEmergencyStop} 
+              activeOpacity={0.7}
+            >
+              <MaterialCommunityIcons name="pause" size={28} color="white" />
+              <Text style={styles.buttonLabel}>STOP</Text>
+            </TouchableOpacity>
+
+            {/* SOS 버튼 */}
+            <TouchableOpacity 
+              style={[styles.circleButton, styles.sosButton]} 
+              onPress={handleSOSRequest} 
+              activeOpacity={0.7}
+            >
+              <MaterialIcons name="phone-in-talk" size={28} color="white" />
+              <Text style={styles.buttonLabel}>SOS</Text>
+            </TouchableOpacity>
+
+          </View>
         </View>
 
         <FlatList
           ref={flatListRef}
           data={messages}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.chatContent} // 아래에 flexGrow 추가됨
+          contentContainerStyle={styles.chatContent}
           renderItem={({ item }) => (
             <View style={{ marginBottom: 16 }}>
               <View style={[
@@ -507,6 +542,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 2, borderColor: '#e5e7eb', marginTop: Platform.OS === 'android' ? 30 : 0,
   },
   headerLeft: { flexDirection: 'row', alignItems: 'center' },
+  headerRight: { flexDirection: 'row', gap: 10 }, // 버튼 간격
   statusContainer: { justifyContent: 'center' },
   headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#111' },
   headerStatus: { fontSize: 16, color: '#0ea5e9', fontWeight: '600' },
@@ -522,17 +558,24 @@ const styles = StyleSheet.create({
   eyeBlinking: { opacity: 0.5 },
   mouth: { width: 20, height: 4, borderRadius: 2, backgroundColor: '#333' },
   mouthHappy: { height: 8, borderBottomLeftRadius: 10, borderBottomRightRadius: 10, backgroundColor: 'transparent', borderWidth: 2, borderTopWidth: 0, borderColor: '#333' },
-  sosButton: {
-    backgroundColor: '#dc2626', width: 70, height: 70, borderRadius: 35,
+  
+  // 버튼 공통 스타일
+  circleButton: {
+    width: 64, height: 64, borderRadius: 32,
     justifyContent: 'center', alignItems: 'center',
-    shadowColor: "#dc2626", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5, elevation: 5,
+    shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, 
+    shadowOpacity: 0.3, shadowRadius: 5, elevation: 5,
   },
-  sosText: { color: 'white', fontWeight: 'bold', marginTop: 2, fontSize: 12 },
+  stopButton: { backgroundColor: '#374151' }, // 진한 회색 (STOP)
+  sosButton: { backgroundColor: '#dc2626' }, // 빨간색 (SOS)
+  
+  buttonLabel: { color: 'white', fontWeight: 'bold', marginTop: 2, fontSize: 11 },
+  
   chatArea: { flex: 1, backgroundColor: '#f0f2f5' },
   chatContent: { 
     padding: 15, 
     paddingBottom: 20,
-    flexGrow: 1, // [추가] 리스트가 작을 때도 레이아웃 유지
+    flexGrow: 1,
   },
   messageBubble: {
     padding: 16, borderRadius: 20, maxWidth: '85%',
