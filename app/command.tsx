@@ -1,6 +1,6 @@
 import { FontAwesome, Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
-import * as FileSystem from 'expo-file-system/legacy'; // 또는 'expo-file-system' (버전에 맞게 사용)
+import * as FileSystem from 'expo-file-system/legacy';
 import { useLocalSearchParams } from 'expo-router';
 import * as Speech from 'expo-speech';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -19,8 +19,17 @@ import {
 } from 'react-native';
 import { useSocket } from '../contexts/SocketContext';
 
+// [오디오 초기화용 무음 파일]
+const SILENT_AUDIO_URI = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD//////////////////////////////////////////////////////////////////wAAAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAAAASAA82xZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//OEZAAAAAAIAAAAAIQAASAAAAAAAAAAAA0OVmn/+5BAAAABuYywAAAAAxlQAAAAEBQWAAAAAAAkAQAAAAAAABABAAAAAAAAAAAAAA//OEZAAAAAAIAAAAAIQAASAAAAAAAAAAAA0OVmn/+5BAAAABuYywAAAAAxlQAAAAEBQWAAAAAAAkAQAAAAAAABABAAAAAAAAAAAAAA';
+
 // --- [유틸리티] 지연 함수 ---
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- [유틸리티] 로그 함수 ---
+const logStep = (tag: string, message: string) => {
+  const time = new Date().toISOString().split('T')[1].slice(0, -1);
+  console.log(`[${time}] [${tag}] ${message}`);
+};
 
 interface Message {
   id: string;
@@ -31,7 +40,6 @@ interface Message {
   isAnswered?: boolean;
 }
 
-// --- 로봇 얼굴 컴포넌트 ---
 const RobotFace = ({ emotion, isSpeaking }: { emotion: string; isSpeaking: boolean }) => {
   const eyeColor = emotion === 'error' ? '#ff4d4d' : '#333';
   return (
@@ -63,25 +71,58 @@ export default function CommandScreen() {
   const [sosModalVisible, setSosModalVisible] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
-  // --- 1. 듣기(TTS) 모드 설정: 스피커 강제 및 DuckOthers 사용 ---
+  // [추가] 무음 사운드 객체를 저장할 Ref
+  const silentSoundRef = useRef<Audio.Sound | null>(null);
+
+  // [추가] 앱 진입 시 무음 파일 미리 로드 (1번만 실행됨)
+  useEffect(() => {
+    const loadSound = async () => {
+      try {
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: SILENT_AUDIO_URI },
+          { shouldPlay: false, volume: 0 } // 미리 로드만 하고 재생은 안 함, 볼륨 0
+        );
+        silentSoundRef.current = sound;
+        console.log('[Audio] 🔇 무음 파일 미리 로드 완료');
+      } catch (error) {
+        console.log('[Audio] 무음 파일 로드 실패', error);
+      }
+    };
+
+    loadSound();
+
+    // 앱 종료 시 메모리 해제
+    return () => {
+      if (silentSoundRef.current) {
+        silentSoundRef.current.unloadAsync();
+      }
+    };
+  }, []);
+
+  // =================================================================
+  // 1. 오디오 모드 설정
+  // =================================================================
   const setModePlayback = async () => {
+    logStep('Audio', '🔊 재생 모드(Playback) 설정 진입');
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
-        staysActiveInBackground: true,
+        staysActiveInBackground: false, // 미러링 중에는 false가 라우팅 변경에 유리함
         playsInSilentModeIOS: true,
         shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false, // 스피커 강제
-        interruptionModeIOS: InterruptionModeIOS.DuckOthers, // [변경] DoNotMix -> DuckOthers
-        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+        playThroughEarpieceAndroid: false,
+        // allowsAirPlayIOS: true,  <-- 이 줄 삭제됨 (존재하지 않음)
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix, 
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
       });
+      logStep('Audio', '✅ 재생 모드 설정 완료');
     } catch (e) {
-      console.log('Playback Mode Error:', e);
+      logStep('Audio', `❌ 재생 모드 설정 실패: ${e}`);
     }
   };
 
-  // --- 2. 녹음(Record) 모드 설정 ---
   const setModeRecord = async () => {
+    logStep('Audio', '🎤 녹음 모드(Record) 설정 진입');
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
@@ -89,11 +130,12 @@ export default function CommandScreen() {
         playsInSilentModeIOS: true,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
-        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
       });
+      logStep('Audio', '✅ 녹음 모드 설정 완료');
     } catch (e) {
-      console.log('Record Mode Error:', e);
+      logStep('Audio', `❌ 녹음 모드 설정 실패: ${e}`);
     }
   };
 
@@ -101,26 +143,33 @@ export default function CommandScreen() {
     setModePlayback();
   }, []);
 
-  // --- TTS 함수 (핵심 수정: 지연 및 모드 확실화) ---
+  // =================================================================
+  // 2. TTS 함수
+  // =================================================================
   const speak = async (text: string) => {
-    Speech.stop(); // 기존 음성 중단
+    logStep('TTS', `🗣️ 말하기 요청: "${text}"`);
+    Speech.stop();
     
-    // 모드 재설정
-    await setModePlayback();
-    
-    // OS 오디오 라우팅 변경 대기 (소리가 작다면 이 값을 300~500으로 늘려보세요)
-    await delay(300); 
+    if (!isRecording && !recording) {
+        await setModePlayback();
+        await delay(200);
+    }
 
     setIsSpeaking(true);
     Speech.speak(text, {
       language: 'ko-KR',
       rate: 0.9,
       pitch: 1.0,
+      onStart: () => logStep('TTS', '▶️ 시작됨'),
       onDone: () => {
+        logStep('TTS', '⏹️ 완료됨');
         setIsSpeaking(false);
         setRobotEmotion('happy');
       },
-      onError: () => setIsSpeaking(false),
+      onError: (e) => {
+        logStep('TTS', `⚠️ 에러: ${e}`);
+        setIsSpeaking(false);
+      },
     });
   };
 
@@ -132,24 +181,29 @@ export default function CommandScreen() {
     setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
   }, []);
 
-  // --- 소켓 및 초기 인사 ---
+  // =================================================================
+  // 3. 소켓 핸들러
+  // =================================================================
   useEffect(() => {
-    setTimeout(() => {
+    const greetingTimer = setTimeout(() => {
         addMessage({ sender: 'bot', text: `${user.name}님, 무엇을 도와드릴까요?`, type: 'simple' });
         speak(`${user.name}님, 무엇을 도와드릴까요?`);
-    }, 800); // 초기 진입 시 안정화 시간 확보
+    }, 800);
 
-    if (!socket) return;
+    if (!socket) {
+      logStep('Socket', '⚠️ 연결 안 됨');
+      return;
+    }
 
     const handleUserSpeech = (data: { text: string }) => {
-      console.log("🎤 내 말 인식됨:", data.text);
+      logStep('Socket', `📩 user-speech: ${data.text}`);
       addMessage({ sender: 'user', text: data.text, type: 'simple' });
       setRobotStatus('생각 중...');
       setRobotEmotion('thinking');
     };
 
     const handleCommandResponse = async (response: any) => {
-      console.log("📥 서버 응답:", response);
+      logStep('Socket', `📩 command-response: ${JSON.stringify(response)}`);
       setRobotStatus('대기 중');
       setRobotEmotion('happy');
 
@@ -174,6 +228,7 @@ export default function CommandScreen() {
     socket.on('command-response', handleCommandResponse);
 
     return () => {
+      clearTimeout(greetingTimer);
       socket.off('user-speech', handleUserSpeech);
       socket.off('command-response', handleCommandResponse);
       Speech.stop();
@@ -182,22 +237,22 @@ export default function CommandScreen() {
 
   const sendMessage = () => {
     if (inputText.trim().length === 0) return;
+    logStep('UI', `텍스트 전송: ${inputText}`);
     addMessage({ sender: 'user', text: inputText, type: 'simple' });
     setRobotStatus('처리 중...');
     setRobotEmotion('thinking');
     
     if (socket) {
       socket.emit('command', { userId: user.id, text: inputText });
-    } else {
-      setTimeout(() => {
-        addMessage({ sender: 'bot', text: '서버 연결 안 됨', type: 'simple' });
-      }, 500);
     }
     setInputText('');
   };
 
-  // --- 🎤 녹음 시작 ---
+  // =================================================================
+  // 4. 녹음 시작/종료 (Dummy Sound 포함)
+  // =================================================================
   const startRecording = async () => {
+    logStep('Record', '버튼 클릭: 녹음 시작');
     try {
       Speech.stop();
       setIsSpeaking(false);
@@ -208,8 +263,10 @@ export default function CommandScreen() {
         return;
       }
 
-      await delay(100);
+      await Audio.setIsEnabledAsync(false);
+      await delay(50);
       await setModeRecord();
+      await Audio.setIsEnabledAsync(true);
       await delay(100);
 
       const { recording } = await Audio.Recording.createAsync(
@@ -220,42 +277,68 @@ export default function CommandScreen() {
       setIsRecording(true);
       setRobotStatus('듣고 있어요...');
       setRobotEmotion('listening');
+      logStep('Record', '🔴 녹음 활성화 됨');
     } catch (err) {
-      console.error("녹음 시작 실패", err);
+      logStep('Record', `❌ 시작 실패: ${err}`);
       setRobotStatus('오류 발생');
       setRobotEmotion('error');
     }
   };
 
-  // --- 🎤 녹음 종료 및 전송 (가장 중요한 해결 부분) ---
+  // 2. 녹음 종료 및 전송 (미러링 딜레이 대응)
   const stopRecordingAndSend = async () => {
+    logStep('Record', '⏹️ 녹음 종료 트리거');
     setIsRecording(false);
     setRobotStatus('처리 중...');
     setRobotEmotion('thinking');
+    
+    const currentRecording = recording;
     setRecording(undefined);
 
-    if (!recording) return;
+    if (!currentRecording) return;
 
     try {
-      // 1. 녹음 중단 및 메모리 해제
-      await recording.stopAndUnloadAsync();
+      // 1. 녹음 중단
+      await currentRecording.stopAndUnloadAsync();
       
-      // 2. 하드웨어 점유 해제 대기
-      await delay(200);
-
-      // [핵심 해결책] 3. 오디오 엔진을 리셋하여 수화부(통화모드)에서 스피커(미디어모드)로 강제 전환 유도
-      await Audio.setIsEnabledAsync(false);
-      await delay(50);
-      await Audio.setIsEnabledAsync(true);
-
-      // 4. 미디어 모드로 확실히 설정
-      await setModePlayback();
-      
-      // 5. 모드가 적용될 시간을 줌
+      // 하드웨어 해제 대기 (미러링 환경 고려 300ms)
       await delay(300);
 
-      const uri = recording.getURI();
+      // ------------------------------------------------------------------
+      // [삭제됨] Audio.setIsEnabledAsync(false/true) 제거
+      // 엔진을 끄지 않고 바로 모드만 변경하여 볼륨 UI 팝업을 방지합니다.
+      // ------------------------------------------------------------------
+      
+      await Audio.setIsEnabledAsync(true);
+      await delay(500);
 
+      // [Dummy Sound Kick - 재사용 버전]
+      logStep('Audio', '📢 스피커 강제 개방 시도 (Replay)');
+      try {
+        if (silentSoundRef.current) {
+          // [핵심] 새로 만드는 게 아니라, 있는 걸 처음부터 다시 재생
+          await silentSoundRef.current.replayAsync();
+          
+          // AirPlay 전송 대기 (1초 유지)
+          await delay(1000);
+          
+          // 주의: 여기서 unloadAsync() 하지 않음! (계속 쓸 거니까)
+          logStep('Audio', '✅ 스피커 개방 성공');
+        } else {
+            // 만약 로드가 안 됐다면 비상용으로 새로 생성 (예외 처리)
+            const { sound } = await Audio.Sound.createAsync(
+                { uri: SILENT_AUDIO_URI },
+                { shouldPlay: true, volume: 0 }
+            );
+            await delay(1000);
+            await sound.unloadAsync();
+        }
+      } catch (soundErr) {
+        logStep('Audio', `⚠️ 스피커 개방 실패: ${soundErr}`);
+      }
+      
+      // 4. 전송 로직 (기존 동일)
+      const uri = currentRecording.getURI();
       if (uri && socket) {
         const base64String = await FileSystem.readAsStringAsync(uri, {
           encoding: 'base64',
@@ -267,12 +350,12 @@ export default function CommandScreen() {
         });
       }
     } catch (error) {
-      console.error("전송 실패:", error);
+      logStep('Record', `❌ 에러: ${error}`);
       setRobotStatus("전송 실패");
       setRobotEmotion('error');
     }
   };
-
+  
   const handleMicPress = () => {
     if (isRecording) {
       stopRecordingAndSend();
@@ -281,6 +364,7 @@ export default function CommandScreen() {
     }
   };
 
+  // --- UI 핸들러 ---
   const handleConfirmAction = (messageId: string, action: string, isYes: boolean) => {
     setMessages(prev => prev.map(msg => 
       msg.id === messageId ? { ...msg, isAnswered: true } : msg
@@ -288,7 +372,6 @@ export default function CommandScreen() {
 
     if (isYes) {
       addMessage({ sender: 'user', text: '네, 해주세요.', type: 'simple' });
-      setRobotStatus('실행 중...');
       socket?.emit('action-confirm', { userId: user.id, command: action });
     } else {
       addMessage({ sender: 'user', text: '아니요.', type: 'simple' });
@@ -317,7 +400,14 @@ export default function CommandScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+      {/* [수정] KeyboardAvoidingView 속성 추가 
+        keyboardVerticalOffset: 미러링 시 상단 Safe Area 오차 보정 (값은 상황에 따라 0, 10, 47 등으로 조절 필요)
+      */}
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined} 
+        style={{ flex: 1 }}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 10 : 0} 
+      >
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <RobotFace emotion={robotEmotion} isSpeaking={isSpeaking} />
@@ -338,7 +428,7 @@ export default function CommandScreen() {
           ref={flatListRef}
           data={messages}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.chatContent}
+          contentContainerStyle={styles.chatContent} // 아래에 flexGrow 추가됨
           renderItem={({ item }) => (
             <View style={{ marginBottom: 16 }}>
               <View style={[
@@ -439,7 +529,11 @@ const styles = StyleSheet.create({
   },
   sosText: { color: 'white', fontWeight: 'bold', marginTop: 2, fontSize: 12 },
   chatArea: { flex: 1, backgroundColor: '#f0f2f5' },
-  chatContent: { padding: 15, paddingBottom: 20 },
+  chatContent: { 
+    padding: 15, 
+    paddingBottom: 20,
+    flexGrow: 1, // [추가] 리스트가 작을 때도 레이아웃 유지
+  },
   messageBubble: {
     padding: 16, borderRadius: 20, maxWidth: '85%',
     shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, elevation: 1,
