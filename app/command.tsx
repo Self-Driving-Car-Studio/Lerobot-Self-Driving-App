@@ -1,6 +1,6 @@
 import { FontAwesome, Ionicons, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system/legacy'; // [추가] 안정적인 파일 읽기를 위해 추가
 import { useLocalSearchParams } from 'expo-router';
 import * as Speech from 'expo-speech';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -31,6 +31,96 @@ const logStep = (tag: string, message: string) => {
   console.log(`[${time}] [${tag}] ${message}`);
 };
 
+// [상수] 다국어 텍스트 정의
+const TRANSLATIONS = {
+  ko: {
+    headerTitle: '로봇 도우미',
+    status_waiting: '대기 중',
+    status_thinking: '생각 중...',
+    status_listening: '듣고 있어요...',
+    status_processing: '처리 중...',
+    status_error: '오류 발생',
+    status_emergency: '긴급 상황',
+    status_stop: '비상 정지',
+    status_send_fail: '전송 실패',
+    
+    greeting: (name: string) => `${name}님, 무엇을 도와드릴까요?`,
+    system_sos_sent: '🚨 긴급 호출이 발송되었습니다.',
+    system_stop: '🛑 로봇을 비상 정지시켰습니다.',
+    
+    btn_yes: '네',
+    btn_no: '아니오',
+    btn_yes_action: '네, 해주세요.',
+    btn_no_action: '아니요.',
+    
+    msg_canceled: '취소했습니다.',
+    msg_sos_confirm: '긴급 호출을 하시겠습니까?',
+    msg_stop_confirm: '로봇을 정지합니다.',
+    
+    input_placeholder: '메시지 입력...',
+    input_listening: '듣고 있어요...',
+    
+    modal_title: '긴급 호출',
+    modal_desc: '보호자에게 긴급 메시지를\n보내시겠습니까?',
+    modal_yes: '예 (호출)',
+    modal_no: '아니요',
+    
+    mic_perm_title: '권한 거부',
+    mic_perm_desc: '마이크 권한이 필요합니다.',
+    
+    ttsLocale: 'ko-KR',
+  },
+  en: {
+    headerTitle: 'Assistant',
+    status_waiting: 'Standby',
+    status_thinking: 'Thinking...',
+    status_listening: 'Listening...',
+    status_processing: 'Processing...',
+    status_error: 'Error',
+    status_emergency: 'Emergency',
+    status_stop: 'Stopped',
+    status_send_fail: 'Send Failed',
+    
+    greeting: (name: string) => `Hello ${name}, how can I help you?`,
+    system_sos_sent: '🚨 Emergency call sent.',
+    system_stop: '🛑 Robot emergency stop activated.',
+    
+    btn_yes: 'Yes',
+    btn_no: 'No',
+    btn_yes_action: 'Yes, please.',
+    btn_no_action: 'No.',
+    
+    msg_canceled: 'Canceled.',
+    msg_sos_confirm: 'Do you want to make an emergency call?',
+    msg_stop_confirm: 'Stopping the robot.',
+    
+    input_placeholder: 'Enter message...',
+    input_listening: 'Listening...',
+    
+    modal_title: 'Emergency Call',
+    modal_desc: 'Send an emergency message\nto your guardian?',
+    modal_yes: 'Yes (Call)',
+    modal_no: 'No',
+    
+    mic_perm_title: 'Permission Denied',
+    mic_perm_desc: 'Microphone permission is required.',
+    
+    ttsLocale: 'en-US',
+  }
+};
+
+type LanguageType = 'ko' | 'en';
+
+type StatusKey = 
+  | 'status_waiting'
+  | 'status_thinking'
+  | 'status_listening'
+  | 'status_processing'
+  | 'status_error'
+  | 'status_emergency'
+  | 'status_stop'
+  | 'status_send_fail';
+
 interface Message {
   id: string;
   sender: 'user' | 'bot' | 'system';
@@ -56,31 +146,37 @@ const RobotFace = ({ emotion, isSpeaking }: { emotion: string; isSpeaking: boole
 };
 
 export default function CommandScreen() {
-  const { userId, userName } = useLocalSearchParams<{ userId: string, userName: string }>();
-  const user = { id: userId || 'guest', name: userName || '사용자' };
+  // [수정] lang 파라미터 수신 (로그인 화면에서 전달받음)
+  const { userId, userName, lang } = useLocalSearchParams<{ userId: string, userName: string, lang?: string }>();
+  const user = { id: userId || 'guest', name: userName || 'User' };
   const socket = useSocket();
+
+  // [수정] 전달받은 lang 파라미터로 초기 언어 설정 (기본값 'ko')
+  const [language, setLanguage] = useState<LanguageType>(lang === 'en' ? 'en' : 'ko');
+  const t = TRANSLATIONS[language];
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
-  const [robotStatus, setRobotStatus] = useState('대기 중');
+  
+  const [robotStatusKey, setRobotStatusKey] = useState<StatusKey>('status_waiting');
   const [robotEmotion, setRobotEmotion] = useState<'happy' | 'listening' | 'thinking' | 'error'>('happy');
   const [isSpeaking, setIsSpeaking] = useState(false);
   
   const [recording, setRecording] = useState<Audio.Recording | undefined>(undefined);
   const [isRecording, setIsRecording] = useState(false);
   const [sosModalVisible, setSosModalVisible] = useState(false);
+  
   const flatListRef = useRef<FlatList>(null);
-
-  // [추가] 무음 사운드 객체를 저장할 Ref
   const silentSoundRef = useRef<Audio.Sound | null>(null);
+  const hasGreeted = useRef(false); // [추가] 중복 인사 방지용
 
-  // [추가] 앱 진입 시 무음 파일 미리 로드 (1번만 실행됨)
+  // [초기화] 앱 진입 시 무음 파일 미리 로드
   useEffect(() => {
     const loadSound = async () => {
       try {
         const { sound } = await Audio.Sound.createAsync(
           { uri: SILENT_AUDIO_URI },
-          { shouldPlay: false, volume: 0 } // 미리 로드만 하고 재생은 안 함, 볼륨 0
+          { shouldPlay: false, volume: 0 }
         );
         silentSoundRef.current = sound;
         console.log('[Audio] 🔇 무음 파일 미리 로드 완료');
@@ -91,7 +187,6 @@ export default function CommandScreen() {
 
     loadSound();
 
-    // 앱 종료 시 메모리 해제
     return () => {
       if (silentSoundRef.current) {
         silentSoundRef.current.unloadAsync();
@@ -99,30 +194,24 @@ export default function CommandScreen() {
     };
   }, []);
 
-  // =================================================================
   // 1. 오디오 모드 설정
-  // =================================================================
   const setModePlayback = async () => {
-    logStep('Audio', '🔊 재생 모드(Playback) 설정 진입');
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
-        staysActiveInBackground: false, // 미러링 중에는 false가 라우팅 변경에 유리함
+        staysActiveInBackground: false,
         playsInSilentModeIOS: true,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
-        // allowsAirPlayIOS: true,  <-- 이 줄 삭제됨 (존재하지 않음)
         interruptionModeIOS: InterruptionModeIOS.DoNotMix, 
         interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
       });
-      logStep('Audio', '✅ 재생 모드 설정 완료');
     } catch (e) {
       logStep('Audio', `❌ 재생 모드 설정 실패: ${e}`);
     }
   };
 
   const setModeRecord = async () => {
-    logStep('Audio', '🎤 녹음 모드(Record) 설정 진입');
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
@@ -133,7 +222,6 @@ export default function CommandScreen() {
         interruptionModeIOS: InterruptionModeIOS.DoNotMix,
         interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
       });
-      logStep('Audio', '✅ 녹음 모드 설정 완료');
     } catch (e) {
       logStep('Audio', `❌ 녹음 모드 설정 실패: ${e}`);
     }
@@ -143,9 +231,7 @@ export default function CommandScreen() {
     setModePlayback();
   }, []);
 
-  // =================================================================
   // 2. TTS 함수
-  // =================================================================
   const speak = async (text: string) => {
     logStep('TTS', `🗣️ 말하기 요청: "${text}"`);
     Speech.stop();
@@ -157,17 +243,14 @@ export default function CommandScreen() {
 
     setIsSpeaking(true);
     Speech.speak(text, {
-      language: 'ko-KR',
+      language: t.ttsLocale,
       rate: 0.9,
       pitch: 1.0,
-      onStart: () => logStep('TTS', '▶️ 시작됨'),
       onDone: () => {
-        logStep('TTS', '⏹️ 완료됨');
         setIsSpeaking(false);
         setRobotEmotion('happy');
       },
-      onError: (e) => {
-        logStep('TTS', `⚠️ 에러: ${e}`);
+      onError: () => {
         setIsSpeaking(false);
       },
     });
@@ -178,17 +261,22 @@ export default function CommandScreen() {
       ...prev,
       { id: Math.random().toString(), ...msg },
     ]);
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
   }, []);
 
-  // =================================================================
+  // [추가] 채팅창 자동 스크롤 핸들러
+  const handleContentSizeChange = () => {
+    flatListRef.current?.scrollToEnd({ animated: true });
+  };
+
   // 3. 소켓 핸들러
-  // =================================================================
   useEffect(() => {
-    const greetingTimer = setTimeout(() => {
-        addMessage({ sender: 'bot', text: `${user.name}님, 무엇을 도와드릴까요?`, type: 'simple' });
-        speak(`${user.name}님, 무엇을 도와드릴까요?`);
-    }, 800);
+    // [수정] 인사 중복 방지 로직 적용
+    if (!hasGreeted.current) {
+        const greetText = t.greeting(user.name);
+        addMessage({ sender: 'bot', text: greetText, type: 'simple' });
+        speak(greetText);
+        hasGreeted.current = true;
+    }
 
     if (!socket) {
       logStep('Socket', '⚠️ 연결 안 됨');
@@ -196,15 +284,13 @@ export default function CommandScreen() {
     }
 
     const handleUserSpeech = (data: { text: string }) => {
-      logStep('Socket', `📩 user-speech: ${data.text}`);
       addMessage({ sender: 'user', text: data.text, type: 'simple' });
-      setRobotStatus('생각 중...');
+      setRobotStatusKey('status_thinking');
       setRobotEmotion('thinking');
     };
 
     const handleCommandResponse = async (response: any) => {
-      logStep('Socket', `📩 command-response: ${JSON.stringify(response)}`);
-      setRobotStatus('대기 중');
+      setRobotStatusKey('status_waiting');
       setRobotEmotion('happy');
 
       if (response.recognized_text) {
@@ -228,38 +314,34 @@ export default function CommandScreen() {
     socket.on('command-response', handleCommandResponse);
 
     return () => {
-      clearTimeout(greetingTimer);
       socket.off('user-speech', handleUserSpeech);
       socket.off('command-response', handleCommandResponse);
       Speech.stop();
     };
-  }, [socket, user.name, addMessage]);
+  }, [socket, user.name, addMessage, language]); // language 변경 시 재구독
 
   const sendMessage = () => {
     if (inputText.trim().length === 0) return;
-    logStep('UI', `텍스트 전송: ${inputText}`);
     addMessage({ sender: 'user', text: inputText, type: 'simple' });
-    setRobotStatus('처리 중...');
+    setRobotStatusKey('status_processing');
     setRobotEmotion('thinking');
     
     if (socket) {
-      socket.emit('command', { userId: user.id, text: inputText });
+      // [수정] lang 필드 추가 전송
+      socket.emit('command', { userId: user.id, text: inputText, lang: language });
     }
     setInputText('');
   };
 
-  // =================================================================
-  // 4. 녹음 시작/종료 (Dummy Sound 포함)
-  // =================================================================
+  // 4. 녹음 시작/종료
   const startRecording = async () => {
-    logStep('Record', '버튼 클릭: 녹음 시작');
     try {
       Speech.stop();
       setIsSpeaking(false);
 
       const permission = await Audio.requestPermissionsAsync();
       if (permission.status !== 'granted') {
-        Alert.alert("권한 거부", "마이크 권한이 필요합니다.");
+        Alert.alert(t.mic_perm_title, t.mic_perm_desc);
         return;
       }
 
@@ -275,21 +357,18 @@ export default function CommandScreen() {
 
       setRecording(recording);
       setIsRecording(true);
-      setRobotStatus('듣고 있어요...');
+      setRobotStatusKey('status_listening');
       setRobotEmotion('listening');
-      logStep('Record', '🔴 녹음 활성화 됨');
     } catch (err) {
       logStep('Record', `❌ 시작 실패: ${err}`);
-      setRobotStatus('오류 발생');
+      setRobotStatusKey('status_error');
       setRobotEmotion('error');
     }
   };
 
-  // 2. 녹음 종료 및 전송 (미러링 딜레이 대응)
   const stopRecordingAndSend = async () => {
-    logStep('Record', '⏹️ 녹음 종료 트리거');
     setIsRecording(false);
-    setRobotStatus('처리 중...');
+    setRobotStatusKey('status_thinking');
     setRobotEmotion('thinking');
     
     const currentRecording = recording;
@@ -298,34 +377,17 @@ export default function CommandScreen() {
     if (!currentRecording) return;
 
     try {
-      // 1. 녹음 중단
       await currentRecording.stopAndUnloadAsync();
-      
-      // 하드웨어 해제 대기 (미러링 환경 고려 300ms)
       await delay(300);
-
-      // ------------------------------------------------------------------
-      // [삭제됨] Audio.setIsEnabledAsync(false/true) 제거
-      // 엔진을 끄지 않고 바로 모드만 변경하여 볼륨 UI 팝업을 방지합니다.
-      // ------------------------------------------------------------------
-      
       await Audio.setIsEnabledAsync(true);
       await delay(500);
 
-      // [Dummy Sound Kick - 재사용 버전]
-      logStep('Audio', '📢 스피커 강제 개방 시도 (Replay)');
+      // [Sound Kick]
       try {
         if (silentSoundRef.current) {
-          // [핵심] 새로 만드는 게 아니라, 있는 걸 처음부터 다시 재생
           await silentSoundRef.current.replayAsync();
-          
-          // AirPlay 전송 대기 (1초 유지)
           await delay(1000);
-          
-          // 주의: 여기서 unloadAsync() 하지 않음! (계속 쓸 거니까)
-          logStep('Audio', '✅ 스피커 개방 성공');
         } else {
-            // 만약 로드가 안 됐다면 비상용으로 새로 생성 (예외 처리)
             const { sound } = await Audio.Sound.createAsync(
                 { uri: SILENT_AUDIO_URI },
                 { shouldPlay: true, volume: 0 }
@@ -337,21 +399,29 @@ export default function CommandScreen() {
         logStep('Audio', `⚠️ 스피커 개방 실패: ${soundErr}`);
       }
       
-      // 4. 전송 로직 (기존 동일)
       const uri = currentRecording.getURI();
       if (uri && socket) {
-        const base64String = await FileSystem.readAsStringAsync(uri, {
-          encoding: 'base64',
-        });
-        socket.emit('audio-upload', {
-          audioData: base64String,
-          format: 'm4a',
-          userId: user.id
-        });
+        // [수정] FileSystem을 이용한 안정적인 파일 읽기 (Android 호환성)
+        try {
+            const base64Data = await FileSystem.readAsStringAsync(uri, {
+                encoding: FileSystem.EncodingType.Base64,
+            });
+            
+            // [수정] lang 필드 추가하여 오디오 전송
+            socket.emit('audio-upload', {
+                audioData: base64Data,
+                format: 'm4a',
+                userId: user.id,
+                lang: language // 현재 언어 설정 전달
+            });
+        } catch (fileErr) {
+            console.log('File read error:', fileErr);
+            throw fileErr;
+        }
       }
     } catch (error) {
       logStep('Record', `❌ 에러: ${error}`);
-      setRobotStatus("전송 실패");
+      setRobotStatusKey('status_send_fail');
       setRobotEmotion('error');
     }
   };
@@ -371,51 +441,48 @@ export default function CommandScreen() {
     ));
 
     if (isYes) {
-      addMessage({ sender: 'user', text: '네, 해주세요.', type: 'simple' });
-      socket?.emit('action-confirm', { userId: user.id, command: action });
+      addMessage({ sender: 'user', text: t.btn_yes_action, type: 'simple' });
+      // [수정] lang 필드 추가
+      socket?.emit('action-confirm', { userId: user.id, command: action, lang: language });
     } else {
-      addMessage({ sender: 'user', text: '아니요.', type: 'simple' });
-      speak("취소했습니다.");
+      addMessage({ sender: 'user', text: t.btn_no_action, type: 'simple' });
+      speak(t.msg_canceled);
     }
   };
 
   const handleSOSRequest = () => {
     setSosModalVisible(true);
-    speak("긴급 호출을 하시겠습니까?");
+    speak(t.msg_sos_confirm);
   };
 
   const confirmSOS = () => {
     setSosModalVisible(false);
-    addMessage({ sender: 'system', text: '🚨 긴급 호출이 발송되었습니다.', type: 'simple' });
-    setRobotStatus('긴급 상황');
+    addMessage({ sender: 'system', text: t.system_sos_sent, type: 'simple' });
+    setRobotStatusKey('status_emergency');
     setRobotEmotion('error');
-    speak("긴급 호출이 발송되었습니다.");
-    socket?.emit('command', { userId: user.id, text: 'SOS 긴급 호출' });
+    speak(t.system_sos_sent);
+    // [수정] lang 필드 추가 (서버가 긴급 상황 로그를 해당 언어로 남기거나 처리할 수 있도록)
+    socket?.emit('command', { userId: user.id, text: 'SOS 긴급 호출', lang: language });
   };
 
   const cancelSOS = () => {
     setSosModalVisible(false);
-    speak("취소되었습니다.");
+    speak(t.msg_canceled);
   };
 
-  // [신규] 비상 정지 핸들러 (모달 없음, 즉시 실행)
   const handleEmergencyStop = () => {
-    logStep('Command', '🛑 비상 정지 버튼 클릭');
-    
-    // UI 즉시 피드백
-    setRobotStatus('비상 정지');
+    setRobotStatusKey('status_stop');
     setRobotEmotion('error');
-    addMessage({ sender: 'system', text: '🛑 로봇을 비상 정지시켰습니다.', type: 'simple' });
-    speak("로봇을 정지합니다.");
+    addMessage({ sender: 'system', text: t.system_stop, type: 'simple' });
+    speak(t.msg_stop_confirm);
 
-    // 소켓으로 'pause' 전송
     if (socket) {
-      socket.emit('pause', { userId: user.id, text: '로봇 비상 정지'});
-      logStep('Socket', '📤 pause 이벤트 전송 완료');
+      // [수정] lang 필드 추가
+      socket.emit('pause', { userId: user.id, text: '로봇 비상 정지', lang: language });
     }
   };
 
-return (
+  return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView 
         behavior={Platform.OS === 'ios' ? 'padding' : undefined} 
@@ -426,17 +493,14 @@ return (
           <View style={styles.headerLeft}>
             <RobotFace emotion={robotEmotion} isSpeaking={isSpeaking} />
             <View style={styles.statusContainer}>
-              <Text style={styles.headerTitle}>로봇 도우미</Text>
-              <Text style={[styles.headerStatus, robotStatus === '긴급 상황' && styles.statusEmergency]}>
-                {robotStatus}
+              <Text style={styles.headerTitle}>{t.headerTitle}</Text>
+              <Text style={[styles.headerStatus, robotStatusKey === 'status_emergency' && styles.statusEmergency]}>
+                {t[robotStatusKey] as string}
               </Text>
             </View>
           </View>
 
-          {/* 오른쪽 버튼 영역 (STOP + SOS) */}
           <View style={styles.headerRight}>
-            
-            {/* 비상 정지 버튼 (STOP) */}
             <TouchableOpacity 
               style={[styles.circleButton, styles.stopButton]} 
               onPress={handleEmergencyStop} 
@@ -446,7 +510,6 @@ return (
               <Text style={styles.buttonLabel}>STOP</Text>
             </TouchableOpacity>
 
-            {/* SOS 버튼 */}
             <TouchableOpacity 
               style={[styles.circleButton, styles.sosButton]} 
               onPress={handleSOSRequest} 
@@ -455,7 +518,6 @@ return (
               <MaterialIcons name="phone-in-talk" size={28} color="white" />
               <Text style={styles.buttonLabel}>SOS</Text>
             </TouchableOpacity>
-
           </View>
         </View>
 
@@ -464,6 +526,8 @@ return (
           data={messages}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.chatContent}
+          // [수정] onContentSizeChange로 자동 스크롤 개선
+          onContentSizeChange={handleContentSizeChange}
           renderItem={({ item }) => (
             <View style={{ marginBottom: 16 }}>
               <View style={[
@@ -482,10 +546,10 @@ return (
               {item.sender === 'bot' && item.type === 'confirm' && !item.isAnswered && (
                 <View style={styles.buttonGroup}>
                   <TouchableOpacity style={[styles.actionBtn, styles.yesBtn]} onPress={() => handleConfirmAction(item.id, item.actionCommand || '', true)}>
-                    <Text style={styles.actionBtnText}>네</Text>
+                    <Text style={styles.actionBtnText}>{t.btn_yes}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.actionBtn, styles.noBtn]} onPress={() => handleConfirmAction(item.id, item.actionCommand || '', false)}>
-                    <Text style={[styles.actionBtnText, { color: '#333' }]}>아니오</Text>
+                    <Text style={[styles.actionBtnText, { color: '#333' }]}>{t.btn_no}</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -502,7 +566,7 @@ return (
             style={styles.input}
             value={inputText}
             onChangeText={setInputText}
-            placeholder={isRecording ? "듣고 있어요..." : "메시지 입력..."}
+            placeholder={isRecording ? t.input_listening : t.input_placeholder}
             placeholderTextColor="#999"
             onSubmitEditing={sendMessage}
             editable={!isRecording}
@@ -516,14 +580,14 @@ return (
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <MaterialIcons name="campaign" size={60} color="#dc2626" />
-              <Text style={styles.modalTitle}>긴급 호출</Text>
-              <Text style={styles.modalDesc}>보호자에게 긴급 메시지를{"\n"}보내시겠습니까?</Text>
+              <Text style={styles.modalTitle}>{t.modal_title}</Text>
+              <Text style={styles.modalDesc}>{t.modal_desc}</Text>
               <View style={styles.modalButtons}>
                 <TouchableOpacity style={[styles.modalBtn, styles.modalBtnYes]} onPress={confirmSOS}>
-                  <Text style={styles.modalBtnText}>예 (호출)</Text>
+                  <Text style={styles.modalBtnText}>{t.modal_yes}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={[styles.modalBtn, styles.modalBtnNo]} onPress={cancelSOS}>
-                  <Text style={[styles.modalBtnText, {color:'#333'}]}>아니요</Text>
+                  <Text style={[styles.modalBtnText, {color:'#333'}]}>{t.modal_no}</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -542,11 +606,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: 2, borderColor: '#e5e7eb', marginTop: Platform.OS === 'android' ? 30 : 0,
   },
   headerLeft: { flexDirection: 'row', alignItems: 'center' },
-  headerRight: { flexDirection: 'row', gap: 10 }, // 버튼 간격
+  headerRight: { flexDirection: 'row', gap: 10, alignItems: 'center' }, 
   statusContainer: { justifyContent: 'center' },
   headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#111' },
   headerStatus: { fontSize: 16, color: '#0ea5e9', fontWeight: '600' },
   statusEmergency: { color: '#dc2626', fontWeight: 'bold' },
+  
+  // 로봇 얼굴 스타일
   robotFaceContainer: { marginRight: 15 },
   robotHead: {
     width: 60, height: 60, backgroundColor: '#e0f2fe', borderRadius: 30,
@@ -566,17 +632,12 @@ const styles = StyleSheet.create({
     shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, 
     shadowOpacity: 0.3, shadowRadius: 5, elevation: 5,
   },
-  stopButton: { backgroundColor: '#374151' }, // 진한 회색 (STOP)
-  sosButton: { backgroundColor: '#dc2626' }, // 빨간색 (SOS)
-  
+  stopButton: { backgroundColor: '#374151' }, 
+  sosButton: { backgroundColor: '#dc2626' }, 
   buttonLabel: { color: 'white', fontWeight: 'bold', marginTop: 2, fontSize: 11 },
   
   chatArea: { flex: 1, backgroundColor: '#f0f2f5' },
-  chatContent: { 
-    padding: 15, 
-    paddingBottom: 20,
-    flexGrow: 1,
-  },
+  chatContent: { padding: 15, paddingBottom: 20, flexGrow: 1 },
   messageBubble: {
     padding: 16, borderRadius: 20, maxWidth: '85%',
     shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, elevation: 1,
